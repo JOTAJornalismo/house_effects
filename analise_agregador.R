@@ -1,4 +1,4 @@
-setwd('~/Documentos/academic/house_effects/')
+setwd('~/Documentos/jota/house_effects/')
 
 
 library(rstan)
@@ -6,15 +6,38 @@ library(tidyverse)
 library(lubridate)
 
 
-polls2014 <- read.csv('polls_2014_Presidential_2.csv', stringsAsFactors = F)
-polls2010 <- read.csv('polls_2010_Presidential_2.csv', stringsAsFactors = F, sep = ';')
-polls2006 <- read.csv('polls_2006_Presidential_2.csv', stringsAsFactors = F, sep = ';')
-polls2002 <- read.csv('polls_2002_Presidential_2.csv', stringsAsFactors = F, sep = ';')
+data_total <- list(
+  `2014` = list(polls = read.csv('polls_2014_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
+                start_2round_day = "06/10/2014",
+                election_day = "26/10/2014"),
+  `2010` = list(polls = read.csv('polls_2010_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
+                start_2round_day = "4/10/2010",
+                election_day = "31/10/2010"),
+  `2006` = list(polls = read.csv('polls_2006_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
+                start_2round_day = "1/10/2006",
+                election_day = "29/10/2006"),
+  `2002` = list(polls = read.csv('polls_2002_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
+                start_2round_day = "7/10/2002",
+                election_day = "27/10/2002")
+)
+
+
+
+
 
 
 # wrangling data
 
-wrangle_polls <- function(polls) {
+wrangle_polls <- function(partial_data) {
+  polls <- partial_data$polls %>%
+    select(-Numero.Registro, -link) %>% 
+    gather(candidate, percentage, -Entrevistas, -Instituto, -Data) %>%
+    filter(stringr::str_detect(candidate, "(PT|PSDB)")) 
+  
+  start_2round_day <- partial_data$start_2round_day
+  election_day <- partial_data$election_day
+  
+  
   polls <- polls %>%
     mutate(Data = ymd(Data),
            percentage = percentage %>% str_replace(',', '.') %>%  as.numeric %>% `/`(., 100)
@@ -27,8 +50,9 @@ wrangle_polls <- function(polls) {
   polls
 }
 
-polls2014 <- 
 
+
+data_total <- map(data_total, wrangle_polls)
 
 ##################################################################
 # E-1
