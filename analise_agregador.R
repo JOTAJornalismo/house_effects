@@ -1,4 +1,4 @@
-setwd('~/Documentos/jota/house_effects/')
+setwd('~/Documentos/academic/house_effects/')
 
 
 library(rstan)
@@ -15,12 +15,8 @@ data_total <- list(
                 election_day = "31/10/2010"),
   `2006` = list(polls = read.csv('polls_2006_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
                 start_2round_day = "1/10/2006",
-                election_day = "29/10/2006"),
-  `2002` = list(polls = read.csv('polls_2002_Presidential_2.csv', stringsAsFactors = F, sep = ';'),
-                start_2round_day = "7/10/2002",
-                election_day = "27/10/2002")
+                election_day = "29/10/2006")
 )
-
 
 
 
@@ -34,19 +30,25 @@ wrangle_polls <- function(partial_data) {
     gather(candidate, percentage, -Entrevistas, -Instituto, -Data) %>%
     filter(stringr::str_detect(candidate, "(PT|PSDB)")) 
   
-  start_2round_day <- partial_data$start_2round_day
-  election_day <- partial_data$election_day
+  start_2round_day <- lubridate::dmy(partial_data$start_2round_day)
+  election_day <- lubridate::dmy(partial_data$election_day)
   
   
   polls <- polls %>%
     mutate(Data = ymd(Data),
            percentage = percentage %>% str_replace(',', '.') %>%  as.numeric %>% `/`(., 100)
            ) %>%
-    mutate(election_day = max(Data),
-           start_2round_day = min(Data)) %>%
     filter(Data >= start_2round_day) %>%
+    filter(!is.na(percentage)) %>%
     mutate(t = as.integer(Data - start_2round_day) + 1,
-           id_instituto = Instituto %>% as.factor %>% as.integer)
+           id_instituto = Instituto %>% as.factor %>% as.integer) %>%
+    group_by(Data, Instituto) %>%
+    mutate(total_percentage = sum(percentage)) %>%
+    ungroup() %>%
+    mutate(percentage = percentage / total_percentage) %>%
+    mutate(candidate = stringr::str_trim(stringr::str_replace_all(candidate, "(\\.)+", " "))) %>%
+    rename(n_entrevistas = Entrevistas)
+    
   polls
 }
 
@@ -54,221 +56,11 @@ wrangle_polls <- function(partial_data) {
 
 data_total <- map(data_total, wrangle_polls)
 
-##################################################################
-# E-1
-# Running a model without likelihood
-##################################################################
-
-agg_model <- '
-data {
-  int<lower=1> n_days;            // number of days
-}
-parameters {
-  real<lower=0, upper=1> mu[n_days];               // underlying state of vote intention
-}
-model {
-   // state model
-  mu[1]  ~ normal(0.5, 0.0025);
-  for (i in 2:n_days)
-      mu[i] ~ normal(mu[i - 1], 0.0025);
-}
-'
-
-model_ex1 <- stan(model_code = agg_model, data = list(n_days = max(polls$t)), chains = 1, iter = 2500)
-
-
-extract_summary <- function(model, first_day) {
-  # Extract summaries from Stan simulated data
-    tibble(
-      median = apply(model$mu, 2,median),
-      p10 = apply(model$mu, 2,function(x) quantile(x, .1)),
-      p90 = apply(model$mu, 2,function(x) quantile(x, .90)),
-      p05 = apply(model$mu, 2,function(x) quantile(x, .05)),
-      p95 = apply(model$mu, 2,function(x) quantile(x, .95)),
-      t = 1:dim(model$mu)[2],
-      days = first_day + 1:dim(model$mu)[2]
-  )
-}
-
-# Checking convergence
-traceplot(model_ex1)
-model_ex1_data <- rstan::extract(model_ex1)
-
-
-# Plotting data
-model_ex1_data %>%
-  extract_summary(., start_2round_day) %>%
-  ggplot() +
-  geom_line(aes(x = days, y = median )) +
-  geom_ribbon(aes(x = days, ymin = p05,  ymax = p95), alpha = 0.2) +
-  theme_bw() + labs(y = "percentage")
 
 
 
 
 
-##################################################################
-# E-2
-# Running a model with likelihood
-##################################################################
-
-create_datalist <- function(df,candidate_name) {
-  # Return data list for using inside Stan
-  df <- dplyr::filter(df, candidate == candidate_name)
-  return(
-    list(n_days = max(df$t),
-         y_n = nrow(df),
-         y_values = df$percentage,
-         y_days = df$t,
-         n_sample = df$n_entrevistas,
-         id_company = df$id_instituto
-    )
-  )
-}
-
-
-agg_model2 <- '
-data {
-  int<lower=1> n_days;            // number of days
-  int<lower=1> y_n;               // number of polls
-  real y_values[y_n];             // actual values in polls
-  int<lower=0> y_days[y_n];       // the number of days since starting election each poll was taken
-  real n_sample[y_n];             // sample size for each poll
-//  int<lower=0> id_company;        // id for research companies
-}
-parameters {
-  real<lower=0, upper=1> mu[n_days];               // underlying state of vote intention
-}
-model {
-  mu[1] ~ uniform(0, 1);
-  for (i in 2:n_days)
-      mu[i] ~ normal(mu[i - 1], 0.0025);
-
-  for(x in 1:y_n) // likelihood
-//      y_values[x] ~ normal(mu[y_days[x]], 0.01 );
-      y_values[x] ~ normal(mu[y_days[x]], sqrt(y_values[x]*(1-y_values[x])/n_sample[x]) );
-}
-'
-
-ex2_input_data_dilma <- create_datalist(polls, "Dilma_PT")
-model_ex2_dilma <- stan(model_code = agg_model2, data = ex2_input_data_dilma, chains = 1, iter = 2500)
-ex2_input_data_aecio <- create_datalist(polls, "Aecio_PSDB")
-model_ex2_aecio <- stan(model_code = agg_model2, data = ex2_input_data_aecio, chains = 1, iter = 2500)
-
-
-
-
-# Checking convergence
-traceplot(model_ex2_dilma)
-traceplot(model_ex2_aecio)
-
-
-model_ex2_data_dilma <- rstan::extract(model_ex2_dilma)
-model_ex2_data_aecio <- rstan::extract(model_ex2_aecio)
-
-# Merging data
-model_ex2_data_dilma <- model_ex2_data_dilma %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Dilma_PT"))
-
-model_ex2_data_aecio <- model_ex2_data_aecio %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Aecio_PSDB"))
-
-
-bind_rows(model_ex2_data_dilma, model_ex2_data_aecio) %>%
-  ggplot() +
-  geom_line(aes(x = days, y = median, colour = candidate )) +
-  geom_ribbon(aes(x = days, ymin = p05,  ymax = p95, fill = candidate), alpha = 0.2) +
-  geom_point(aes(x = days, y = percentage, shape = Instituto)) +
-  theme_bw() + labs(y = "percentage") +
-  scale_fill_manual(values=c("#0000ff", "#ff0000")) +
-  scale_colour_manual(values=c("#0000ff", "#ff0000"))
-
-
-
-
-
-
-##################################################################
-# E-3
-# Giving weight to each company
-##################################################################
-
-
-polls %>%
-  filter(Instituto == "Ibope") %>%
-  select(id_instituto) %>%
-  slice(1)
-
-polls %>%
-  filter(Instituto == "Datafolha") %>%
-  select(id_instituto) %>%
-  slice(1)
-
-# Datafolha -> id = 1
-# Ibope -> id = 2
-
-agg_model3 <- '
-data {
-  int<lower=1> n_days;            // number of days
-  int<lower=1> y_n;               // number of polls
-  real y_values[y_n];             // actual values in polls
-  int<lower=0> y_days[y_n];       // the number of days since starting election each poll was taken
-  real n_sample[y_n];             // sample size for each poll
-  int<lower=0> id_company[y_n];        // id for research companies
-}
-parameters {
-  real<lower=0, upper=1> mu[n_days];               // underlying state of vote intention
-}
-model {
-mu[1] ~ uniform(0, 1);
-for (i in 2:n_days)
-mu[i] ~ normal(mu[i - 1], 0.0025);
-
-  for(x in 1:y_n)  {
-    if (id_company[x] < 3) {
-      y_values[x] ~ normal(mu[y_days[x]], sqrt(y_values[x]*(1-y_values[x])/n_sample[x]) );
-    } else {
-      y_values[x] ~ normal(mu[y_days[x]], 2*sqrt(y_values[x]*(1-y_values[x])/n_sample[x]) );
-    }
-  }
-}'
-
-ex3_input_data_dilma <- create_datalist(polls, "Dilma_PT")
-model_ex3_dilma <- stan(model_code = agg_model3, data = ex3_input_data_dilma, chains = 1, iter = 2500)
-ex3_input_data_aecio <- create_datalist(polls, "Aecio_PSDB")
-model_ex3_aecio <- stan(model_code = agg_model3, data = ex3_input_data_aecio, chains = 1, iter = 2500)
-
-
-
-
-# Checking convergence
-traceplot(model_ex3_dilma)
-traceplot(model_ex3_aecio)
-
-
-model_ex3_data_dilma <- rstan::extract(model_ex3_dilma)
-model_ex3_data_aecio <- rstan::extract(model_ex3_aecio)
-
-# Merging data
-model_ex3_data_dilma <- model_ex3_data_dilma %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Dilma_PT"))
-
-model_ex3_data_aecio <- model_ex3_data_aecio %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Aecio_PSDB"))
-
-
-bind_rows(model_ex3_data_dilma, model_ex3_data_aecio) %>%
-  ggplot() +
-  geom_line(aes(x = Data, y = median, colour = candidate )) +
-  geom_ribbon(aes(x = Data, ymin = p05,  ymax = p95, fill = candidate), alpha = 0.2) +
-  geom_point(aes(x = Data, y = percentage, shape = Instituto)) +
-  theme_bw() + labs(y = "percentage") +
-  scale_fill_manual(values=c("#0000ff", "#ff0000")) +
-  scale_colour_manual(values=c("#0000ff", "#ff0000"))
 
 
 
@@ -281,7 +73,7 @@ bind_rows(model_ex3_data_dilma, model_ex3_data_aecio) %>%
 # Calculating house effects
 ##################################################################
 
-create_datalist4 <- function(df,candidate_name,actual_result) {
+create_datalist <- function(df,candidate_name,actual_result) {
   # Return data list for using inside Stan
   df <- dplyr::filter(df, candidate == candidate_name)
   return(
@@ -298,7 +90,7 @@ create_datalist4 <- function(df,candidate_name,actual_result) {
 }
 
 
-agg_model4 <- '
+agg_model <- '
 data {
   int<lower=1> n_days;            // number of days
   int<lower=1> y_n;               // number of polls
@@ -330,40 +122,75 @@ model {
   
 }'
 
-ex4_input_data_dilma <- create_datalist4(polls, "Dilma_PT", 0.48366024)
-model_ex4_dilma <- stan(model_code = agg_model4, data = ex4_input_data_dilma, chains = 1, iter = 2500)
-ex4_input_data_aecio <- create_datalist4(polls, "Aecio_PSDB", 0.45293976)
-model_ex4_aecio <- stan(model_code = agg_model4, data = ex4_input_data_aecio, chains = 1, iter = 2500)
+
+#modelo <- stan_model(model_code = agg_model)
+#saveRDS(modelo, file = "modelo.rds")
+modelo <- readRDS('modelo.rds')
+
+dataset_2014 <- create_datalist(data_total$`2014`, "Dilma PT", 0.5164 )
+model_2014 <- stan(model_code = agg_model, data = dataset_2014, chains = 1, iter = 2500)
+traceplot(model_2014)
+
+dataset_2010 <- create_datalist(data_total$`2010`, "Dilma Roussef PT", 0.5605 )
+model_2010 <- stan(model_code = agg_model, data = dataset_2010, chains = 1, iter = 2500)
+traceplot(model_2010)
+
+dataset_2006 <- create_datalist(data_total$`2006`, "Lula PT", 0.6083 )
+model_2006 <- stan(model_code = agg_model, data = dataset_2006, chains = 1, iter = 2500)
+traceplot(model_2006)
 
 
 
+extract_summary <- function(model, first_day) {
+  # Extract summaries from Stan simulated data
+  tibble(
+    median = apply(model$mu, 2,median),
+    p10 = apply(model$mu, 2,function(x) quantile(x, .1)),
+    p90 = apply(model$mu, 2,function(x) quantile(x, .90)),
+    p05 = apply(model$mu, 2,function(x) quantile(x, .05)),
+    p95 = apply(model$mu, 2,function(x) quantile(x, .95)),
+    t = 1:dim(model$mu)[2],
+    days = first_day + 1:dim(model$mu)[2]
+  )
+}
 
-# Checking convergence
-traceplot(model_ex4_dilma)
-traceplot(model_ex4_aecio)
 
-
-model_ex4_data_dilma <- rstan::extract(model_ex4_dilma)
-model_ex4_data_aecio <- rstan::extract(model_ex4_aecio)
+model_2014_data <- rstan::extract(model_2014)
+model_2010_data <- rstan::extract(model_2010)
+model_2006_data <- rstan::extract(model_2006)
 
 # Merging data
-model_ex4_data_dilma <- model_ex4_data_dilma %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Dilma_PT"))
+model_2014_data_df <- model_2014_data %>%
+  extract_summary(., lubridate::dmy("06/10/2014")) %>%
+  inner_join(filter(data_total$`2014`, candidate == "Dilma PT"))
 
-model_ex4_data_aecio <- model_ex4_data_aecio %>%
-  extract_summary(., start_2round_day) %>%
-  inner_join(filter(polls, candidate == "Aecio_PSDB"))
+model_2010_data_df <- model_2010_data %>%
+  extract_summary(., lubridate::dmy("04/10/2010")) %>%
+  inner_join(filter(data_total$`2010`, candidate == "Dilma Roussef PT"))
+
+model_2006_data_df <- model_2006_data %>%
+  extract_summary(., lubridate::dmy("01/10/2006")) %>%
+  inner_join(filter(data_total$`2006`, candidate == "Lula PT"))
 
 
-bind_rows(model_ex4_data_dilma, model_ex4_data_aecio) %>%
-  ggplot() +
-  geom_line(aes(x = Data, y = median, colour = candidate )) +
-  geom_ribbon(aes(x = Data, ymin = p05,  ymax = p95, fill = candidate), alpha = 0.2) +
+
+ggplot(model_2014_data_df) +
+  geom_line(aes(x = Data, y = median ),colour = "red") +
+  geom_ribbon(aes(x = Data, ymin = p05,  ymax = p95),fill = "red", alpha = 0.2) +
   geom_point(aes(x = Data, y = percentage, shape = Instituto)) +
-  theme_bw() + labs(y = "percentage") +
-  scale_fill_manual(values=c("#0000ff", "#ff0000")) +
-  scale_colour_manual(values=c("#0000ff", "#ff0000"))
+  theme_bw() + labs(y = "percentage") 
+
+ggplot(model_2010_data_df) +
+  geom_line(aes(x = Data, y = median ),colour = "red") +
+  geom_ribbon(aes(x = Data, ymin = p05,  ymax = p95),fill = "red", alpha = 0.2) +
+  geom_point(aes(x = Data, y = percentage, shape = Instituto)) +
+  theme_bw() + labs(y = "percentage") 
+
+ggplot(model_2006_data_df) +
+  geom_line(aes(x = Data, y = median ),colour = "red") +
+  geom_ribbon(aes(x = Data, ymin = p05,  ymax = p95),fill = "red", alpha = 0.2) +
+  geom_point(aes(x = Data, y = percentage, shape = Instituto)) +
+  theme_bw() + labs(y = "percentage") 
 
 
 # Analyzing house effects
@@ -380,20 +207,20 @@ extract_house_effects <- function(model) {
   
 }
 
-gamma_dilma <- rstan::extract(model_ex4_dilma) %>% 
+gamma_2014 <- rstan::extract(model_2014) %>% 
   extract_house_effects %>%
-  inner_join( polls %>%
+  inner_join( data_total$`2014` %>%
                 distinct(id_instituto, Instituto)
     ) %>%
-  mutate(candidate = "Dilma_PT") 
+  mutate(candidate = "Dilma PT") 
 
 
 # Convergence for gamma
-traceplot(model_ex4_dilma, "gamma")
+traceplot(model_2014, "gamma")
 
 
 # House effects (Companies)
-gamma_dilma %>%
+gamma_2014 %>%
   ggplot(aes(x = Instituto, y = median)) +
   geom_pointrange(aes(ymin = p05, ymax = p95)) +
   theme_bw() +
@@ -401,6 +228,49 @@ gamma_dilma %>%
   coord_flip()
   
   
+gamma_2010 <- rstan::extract(model_2010) %>% 
+  extract_house_effects %>%
+  inner_join( data_total$`2014` %>%
+                distinct(id_instituto, Instituto)
+  ) %>%
+  mutate(candidate = "Dilma Roussef PT") 
+
+
+# Convergence for gamma
+traceplot(model_2010, "gamma")
+
+
+# House effects (Companies)
+gamma_2010 %>%
+  ggplot(aes(x = Instituto, y = median)) +
+  geom_pointrange(aes(ymin = p05, ymax = p95)) +
+  theme_bw() +
+  labs(y = "House Effect") +
+  coord_flip()
+
+
+
+gamma_2006 <- rstan::extract(model_2006) %>% 
+  extract_house_effects %>%
+  inner_join( data_total$`2014` %>%
+                distinct(id_instituto, Instituto)
+  ) %>%
+  mutate(candidate = "Lula PT") 
+
+
+# Convergence for gamma
+traceplot(model_2006, "gamma")
+
+
+# House effects (Companies)
+gamma_2006 %>%
+  ggplot(aes(x = Instituto, y = median)) +
+  geom_pointrange(aes(ymin = p05, ymax = p95)) +
+  theme_bw() +
+  labs(y = "House Effect") +
+  coord_flip()
+
+
 
 
 
